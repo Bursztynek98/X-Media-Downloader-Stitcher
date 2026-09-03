@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "X Media Downloader & Stitcher",
+  "version": "1.0.0",
+  "description": "Dodaje przycisk do pobierania zdjęć (w tym scalania podzielonych potrójnych obrazków w 1 plik), GIF-ów i filmów na portalu X (Twitter).",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "X Media Downloader & Stitcher",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "host_permissions": [
+    "https://*.x.com/*",
+    "https://*.twitter.com/*",
+    "https://*.twimg.com/*",
+    "https://api.vxtwitter.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": ["gif_encoder.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
