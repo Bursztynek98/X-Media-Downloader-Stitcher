@@ -1,10 +1,11 @@
 /**
- * Lightweight Pure JavaScript MP4 Video to Animated GIF Converter
- * Converts HTML5 Video / MP4 URLs into real .gif files directly in the browser.
+ * High-Quality Pure JavaScript MP4 Video to Animated GIF Converter
+ * Uses Median-Cut Adaptive Color Quantization & 3D Palette Lookup
+ * for HD vibrant GIF output directly in the browser.
  */
 
-class SimpleGifEncoder {
-  constructor(width, height, delayMs = 60) {
+class HighQualityGifEncoder {
+  constructor(width, height, delayMs = 66) {
     this.width = width;
     this.height = height;
     this.delayMs = delayMs;
@@ -19,7 +20,7 @@ class SimpleGifEncoder {
   buildBlob() {
     const w = this.width;
     const h = this.height;
-    const delay = Math.round(this.delayMs / 10); // GIF delay unit is 10ms
+    const delay = Math.max(1, Math.round(this.delayMs / 10));
 
     const bytes = [];
     const pushStr = (str) => {
@@ -40,19 +41,21 @@ class SimpleGifEncoder {
     bytes.push(0);    // Background color index
     bytes.push(0);    // Pixel aspect ratio
 
-    // Build uniform 256-color global palette (6x6x6 color cube + 40 grays)
-    const palette = [];
-    for (let r = 0; r < 6; r++) {
-      for (let g = 0; g < 6; g++) {
-        for (let b = 0; b < 6; b++) {
-          palette.push([Math.round(r * 51), Math.round(g * 51), Math.round(b * 51)]);
+    // Sample pixels across all frames to build high-quality Median-Cut adaptive palette
+    const sampledPixels = [];
+    const frameStep = Math.max(1, Math.floor(this.frames.length / 10));
+
+    for (let f = 0; f < this.frames.length; f += frameStep) {
+      const data = this.frames[f].data;
+      const pixelStep = Math.max(1, Math.floor(data.length / (4 * 3000)));
+      for (let i = 0; i < data.length; i += 4 * pixelStep) {
+        if (data[i + 3] >= 50) {
+          sampledPixels.push(data[i], data[i + 1], data[i + 2]);
         }
       }
     }
-    while (palette.length < 256) {
-      const gray = Math.round(((palette.length - 216) / 40) * 255);
-      palette.push([gray, gray, gray]);
-    }
+
+    const palette = medianCutQuantize(sampledPixels, 256);
 
     // Write Global Color Table (256 * 3 bytes)
     for (let i = 0; i < 256; i++) {
@@ -66,13 +69,8 @@ class SimpleGifEncoder {
     pushStr("NETSCAPE2.0");
     bytes.push(0x03, 0x01, 0x00, 0x00, 0x00); // Loop count = 0 (infinite)
 
-    // Helper: find nearest palette color index for RGB
-    const getColorIdx = (r, g, b) => {
-      const rIdx = Math.min(5, Math.floor((r + 25) / 51));
-      const gIdx = Math.min(5, Math.floor((g + 25) / 51));
-      const bIdx = Math.min(5, Math.floor((b + 25) / 51));
-      return rIdx * 36 + gIdx * 6 + bIdx;
-    };
+    // Build fast 3D palette lookup map (32x32x32 resolution)
+    const getColorIdx = buildPaletteLookup(palette);
 
     // Process each frame
     for (const frameData of this.frames) {
@@ -82,7 +80,7 @@ class SimpleGifEncoder {
       bytes.push(0x21, 0xf9, 0x04);
       bytes.push(0x04); // Disposal method: overwrite
       pushShort(delay);
-      bytes.push(0x00); // Transparent color index (none)
+      bytes.push(0x00); // Transparent color index
       bytes.push(0x00); // Block terminator
 
       // Image Descriptor
@@ -93,7 +91,7 @@ class SimpleGifEncoder {
       pushShort(h);
       bytes.push(0x00); // Local color table flag = 0
 
-      // Map RGBA pixels to 8-bit color indices
+      // Map RGBA pixels to 8-bit adaptive color indices using lookup table
       const indexedPixels = new Uint8Array(w * h);
       for (let i = 0; i < w * h; i++) {
         const r = data[i * 4];
@@ -102,7 +100,7 @@ class SimpleGifEncoder {
         indexedPixels[i] = getColorIdx(r, g, b);
       }
 
-      // Simple LZW Encoder (Code size 8)
+      // LZW Encoder
       const lzwData = lzwEncode(indexedPixels, 8);
       bytes.push(8); // LZW Minimum Code Size
 
@@ -124,6 +122,139 @@ class SimpleGifEncoder {
 
     return new Blob([new Uint8Array(bytes)], { type: 'image/gif' });
   }
+}
+
+/**
+ * Median-Cut Color Quantization Algorithm
+ * Generates an optimal 256-color palette based on video color distribution.
+ */
+function medianCutQuantize(rgbArray, maxColors = 256) {
+  const colorList = [];
+  for (let i = 0; i < rgbArray.length; i += 3) {
+    colorList.push([rgbArray[i], rgbArray[i + 1], rgbArray[i + 2]]);
+  }
+
+  if (colorList.length === 0) {
+    const fallback = [];
+    for (let i = 0; i < 256; i++) fallback.push([i, i, i]);
+    return fallback;
+  }
+
+  let boxes = [{ colors: colorList }];
+
+  while (boxes.length < maxColors) {
+    let maxRange = -1;
+    let splitIdx = -1;
+
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i];
+      if (box.colors.length <= 1) continue;
+
+      const range = getBoxRange(box.colors);
+      if (range.maxDiff > maxRange) {
+        maxRange = range.maxDiff;
+        splitIdx = i;
+      }
+    }
+
+    if (splitIdx === -1 || maxRange <= 0) break;
+
+    const boxToSplit = boxes[splitIdx];
+    const range = getBoxRange(boxToSplit.colors);
+    const channel = range.channel;
+
+    boxToSplit.colors.sort((a, b) => a[channel] - b[channel]);
+    const median = Math.floor(boxToSplit.colors.length / 2);
+
+    const box1 = { colors: boxToSplit.colors.slice(0, median) };
+    const box2 = { colors: boxToSplit.colors.slice(median) };
+
+    boxes.splice(splitIdx, 1, box1, box2);
+  }
+
+  const palette = boxes.map(box => {
+    let r = 0, g = 0, b = 0;
+    for (const c of box.colors) {
+      r += c[0];
+      g += c[1];
+      b += c[2];
+    }
+    const len = box.colors.length || 1;
+    return [Math.round(r / len), Math.round(g / len), Math.round(b / len)];
+  });
+
+  while (palette.length < 256) {
+    palette.push([0, 0, 0]);
+  }
+
+  return palette;
+}
+
+function getBoxRange(colors) {
+  let minR = 255, maxR = 0;
+  let minG = 255, maxG = 0;
+  let minB = 255, maxB = 0;
+
+  for (let i = 0; i < colors.length; i++) {
+    const c = colors[i];
+    if (c[0] < minR) minR = c[0];
+    if (c[0] > maxR) maxR = c[0];
+    if (c[1] < minG) minG = c[1];
+    if (c[1] > maxG) maxG = c[1];
+    if (c[2] < minB) minB = c[2];
+    if (c[2] > maxB) maxB = c[2];
+  }
+
+  const diffR = maxR - minR;
+  const diffG = maxG - minG;
+  const diffB = maxB - minB;
+
+  let channel = 0;
+  let maxDiff = diffR;
+  if (diffG > maxDiff) {
+    channel = 1;
+    maxDiff = diffG;
+  }
+  if (diffB > maxDiff) {
+    channel = 2;
+    maxDiff = diffB;
+  }
+
+  return { channel, maxDiff };
+}
+
+/**
+ * Pre-computes 3D color lookup map (32x32x32) for fast & precise palette indexing.
+ */
+function buildPaletteLookup(palette) {
+  const lookup = new Uint8Array(32 * 32 * 32);
+
+  for (let r = 0; r < 32; r++) {
+    for (let g = 0; g < 32; g++) {
+      for (let b = 0; b < 32; b++) {
+        const realR = (r << 3) + 4;
+        const realG = (g << 3) + 4;
+        const realB = (b << 3) + 4;
+
+        let minDist = Infinity;
+        let bestIdx = 0;
+
+        for (let i = 0; i < 256; i++) {
+          const pr = palette[i][0];
+          const pg = palette[i][1];
+          const pb = palette[i][2];
+          const dist = (realR - pr) ** 2 + (realG - pg) ** 2 + (realB - pb) ** 2;
+          if (dist < minDist) {
+            minDist = dist;
+            bestIdx = i;
+          }
+        }
+        lookup[(r << 10) | (g << 5) | b] = bestIdx;
+      }
+    }
+  }
+
+  return (r, g, b) => lookup[((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)];
 }
 
 // Pure LZW Encoder for GIF (Min Code Size = 8)
@@ -197,7 +328,7 @@ function lzwEncode(pixels, minCodeSize) {
 }
 
 /**
- * Converts a video URL into an animated GIF Blob.
+ * Converts a video URL into an animated HD GIF Blob.
  * @param {string} videoUrl
  * @param {Function} onProgress Progress callback (percentage)
  * @returns {Promise<Blob>}
@@ -212,19 +343,19 @@ async function convertVideoToGif(videoUrl, onProgress = () => {}) {
 
     video.onloadedmetadata = async () => {
       try {
-        const duration = Math.min(video.duration || 3, 6); // Max 6s for fast conversion
+        const duration = Math.min(video.duration || 3, 8); // Up to 8s
         
-        // Scale down large videos to max width 360px for quick encoding and small file size
-        const maxWidth = 360;
-        let width = video.videoWidth || 320;
-        let height = video.videoHeight || 320;
+        // High resolution limit: up to 540px width for sharp, vibrant GIF
+        const maxWidth = 540;
+        let width = video.videoWidth || 480;
+        let height = video.videoHeight || 480;
 
         if (width > maxWidth) {
           height = Math.round(height * (maxWidth / width));
           width = maxWidth;
         }
 
-        const fps = 12; // 12 frames per second for smooth GIF
+        const fps = 15; // Smooth 15 FPS
         const totalFrames = Math.max(1, Math.round(duration * fps));
         const frameInterval = duration / totalFrames;
         const delayMs = Math.round(1000 / fps);
@@ -234,7 +365,7 @@ async function convertVideoToGif(videoUrl, onProgress = () => {}) {
         canvas.height = height;
         const ctx = canvas.getContext('2d');
 
-        const encoder = new SimpleGifEncoder(width, height, delayMs);
+        const encoder = new HighQualityGifEncoder(width, height, delayMs);
 
         for (let i = 0; i < totalFrames; i++) {
           const seekTime = i * frameInterval;

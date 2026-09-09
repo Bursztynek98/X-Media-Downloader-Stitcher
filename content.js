@@ -1,8 +1,9 @@
 /**
  * X (Twitter) Media Downloader & Stitcher Content Script
  * Adds a download button to every tweet action bar on X.com.
- * Supports downloading full-res images (name=orig), automatic MP4-to-GIF conversion,
- * hover preview thumbnails, and smart 1px seam/border auto-crop panorama stitching.
+ * Supports downloading full-res images (name=orig), MP4 & GIF options for EVERY video,
+ * hover preview thumbnails, smart 1px seam auto-crop panorama stitching,
+ * and reliable filtering of quoted tweet media.
  */
 
 (function () {
@@ -102,7 +103,25 @@
     }
   }
 
-  // Extract all photos and videos from a tweet
+  // Check if an element is inside a quoted tweet container
+  function isQuotedMedia(elem, tweet) {
+    let curr = elem;
+    while (curr && curr !== tweet) {
+      if (curr.getAttribute) {
+        const testId = curr.getAttribute('data-testid');
+        if (testId === 'testCondensedMedia' || testId === 'quoteTweet') {
+          return true;
+        }
+        if (curr.tagName === 'ARTICLE' && curr !== tweet) {
+          return true;
+        }
+      }
+      curr = curr.parentElement;
+    }
+    return false;
+  }
+
+  // Extract all photos and videos from a tweet (excluding quoted tweet media)
   function extractTweetMedia(tweet) {
     const photos = [];
     const videos = [];
@@ -112,6 +131,9 @@
     const seenMediaIds = new Set();
 
     photoContainers.forEach(container => {
+      // Exclude media inside quoted tweet card or nested tweet
+      if (isQuotedMedia(container, tweet)) return;
+
       let rawSrc = null;
 
       // Check img element
@@ -159,9 +181,10 @@
     // Sort photos by photo index (/photo/1, /photo/2, etc.) to guarantee correct stitching order
     photos.sort((a, b) => a.index - b.index);
 
-    // Find video elements (including blob videos and GIFs)
+    // Find video elements (excluding quoted tweets)
     const videoElements = tweet.querySelectorAll('video');
     videoElements.forEach((vid, idx) => {
+      if (isQuotedMedia(vid, tweet)) return;
       const poster = vid.getAttribute('poster') || '';
       const isGif = poster.includes('tweet_video_thumb');
       videos.push({
@@ -281,31 +304,13 @@
       return;
     }
 
-    // Single photo
+    // Single photo -> Direct download
     if (media.photos.length === 1 && media.videos.length === 0) {
       downloadFile(media.photos[0].url, `x_photo_${media.photos[0].id}.jpg`);
       return;
     }
 
-    // Single video/GIF
-    if (media.photos.length === 0 && media.videos.length === 1) {
-      const v = media.videos[0];
-      if (v.isGif) {
-        // Open menu to allow choice between .gif and .mp4
-        openDropdownMenu(btnWrap, media, tweet);
-      } else {
-        showToast('Wykrywanie wideo...');
-        const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
-        if (videoUrl) {
-          downloadFile(videoUrl, `x_video_${getTweetId(tweet)}.mp4`);
-        } else {
-          showToast('Nie udało się wyodrębnić linku do wideo MP4.', true);
-        }
-      }
-      return;
-    }
-
-    // Multiple media items -> Toggle dropdown menu
+    // If there is any video (or multiple media items), open menu to offer MP4 vs GIF choices
     if (activeMenu) {
       closeMenu();
       return;
@@ -314,7 +319,7 @@
     openDropdownMenu(btnWrap, media, tweet);
   }
 
-  // Open multi-option dropdown menu with hover image previews and GIF conversion
+  // Open multi-option dropdown menu with hover image previews, MP4 & GIF options for EVERY video
   function openDropdownMenu(btnWrap, media, tweet) {
     const menu = document.createElement('div');
     menu.className = 'x-downloader-menu';
@@ -399,7 +404,7 @@
       });
     }
 
-    // Videos / GIFs option (handled per individual video element)
+    // Videos / GIFs options: Every video gets BOTH .MP4 and .GIF download options!
     if (media.videos.length > 0) {
       if (media.photos.length > 0) {
         const divider3 = document.createElement('div');
@@ -408,72 +413,56 @@
       }
 
       media.videos.forEach((v, idx) => {
-        if (v.isGif) {
-          // GIF options: Convert to real .GIF OR download original .MP4
-          const gifItem = createMenuItem(
-            ICON_GIF,
-            `Pobierz jako .GIF ${idx + 1} (Animowany GIF)`,
-            'highlight',
-            async () => {
-              closeMenu();
-              showToast('Wyciąganie linku GIF...');
-              const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
-              if (videoUrl) {
-                await downloadGifAsRealGif(videoUrl, `x_anim_${getTweetId(tweet)}_${idx + 1}.gif`);
-              } else {
-                showToast('Nie udało się pobrać pliku GIF.', true);
-              }
-            }
-          );
-          if (v.poster) {
-            gifItem.addEventListener('mouseenter', () => showSinglePreview(menu, v.poster, `GIF ${idx + 1} (.gif)`));
-            gifItem.addEventListener('mouseleave', () => removePreview(menu));
-          }
-          menu.appendChild(gifItem);
+        const videoNum = media.videos.length > 1 ? ` ${idx + 1}` : '';
 
-          const mp4Item = createMenuItem(
-            ICON_VIDEO,
-            `Pobierz GIF ${idx + 1} jako .MP4 (Wideo)`,
-            '',
-            async () => {
-              closeMenu();
-              showToast('Pobieranie wideo MP4...');
-              const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
-              if (videoUrl) {
-                downloadFile(videoUrl, `x_gif_${getTweetId(tweet)}_${idx + 1}.mp4`);
-              } else {
-                showToast('Nie udało się pobrać pliku MP4.', true);
-              }
+        // Option 1: Download as MP4
+        const mp4Item = createMenuItem(
+          ICON_VIDEO,
+          `Pobierz Wideo${videoNum} jako .MP4`,
+          media.photos.length === 0 && idx === 0 ? 'highlight' : '',
+          async () => {
+            closeMenu();
+            showToast(`Wykrywanie Wideo${videoNum} MP4...`);
+            const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
+            if (videoUrl) {
+              downloadFile(videoUrl, `x_video_${getTweetId(tweet)}_${idx + 1}.mp4`);
+            } else {
+              showToast(`Nie udało się wyodrębnić wideo MP4.`, true);
             }
-          );
-          if (v.poster) {
-            mp4Item.addEventListener('mouseenter', () => showSinglePreview(menu, v.poster, `GIF ${idx + 1} (.mp4)`));
-            mp4Item.addEventListener('mouseleave', () => removePreview(menu));
           }
-          menu.appendChild(mp4Item);
+        );
+        if (v.poster) {
+          mp4Item.addEventListener('mouseenter', () => showSinglePreview(menu, v.poster, `Wideo${videoNum} (.mp4)`));
+          mp4Item.addEventListener('mouseleave', () => removePreview(menu));
+        }
+        menu.appendChild(mp4Item);
 
-        } else {
-          // Standard video MP4
-          const videoItem = createMenuItem(
-            ICON_VIDEO,
-            `Pobierz Wideo ${idx + 1} (.MP4)`,
-            media.photos.length === 0 && idx === 0 ? 'highlight' : '',
-            async () => {
-              closeMenu();
-              showToast('Wykrywanie wideo MP4...');
-              const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
-              if (videoUrl) {
-                downloadFile(videoUrl, `x_video_${getTweetId(tweet)}_${idx + 1}.mp4`);
-              } else {
-                showToast('Nie udało się wyodrębnić wideo MP4.', true);
-              }
+        // Option 2: Download as GIF (Convert MP4 -> HD GIF)
+        const gifItem = createMenuItem(
+          ICON_GIF,
+          `Pobierz Wideo${videoNum} jako .GIF (Animacja)`,
+          '',
+          async () => {
+            closeMenu();
+            showToast(`Przygotowywanie wideo${videoNum} do konwersji...`);
+            const videoUrl = await getTweetVideoUrl(v.videoElem, tweet);
+            if (videoUrl) {
+              await downloadGifAsRealGif(videoUrl, `x_anim_${getTweetId(tweet)}_${idx + 1}.gif`);
+            } else {
+              showToast(`Nie udało się pobrać pliku GIF.`, true);
             }
-          );
-          if (v.poster) {
-            videoItem.addEventListener('mouseenter', () => showSinglePreview(menu, v.poster, `Wideo ${idx + 1}`));
-            videoItem.addEventListener('mouseleave', () => removePreview(menu));
           }
-          menu.appendChild(videoItem);
+        );
+        if (v.poster) {
+          gifItem.addEventListener('mouseenter', () => showSinglePreview(menu, v.poster, `Wideo${videoNum} (.gif)`));
+          gifItem.addEventListener('mouseleave', () => removePreview(menu));
+        }
+        menu.appendChild(gifItem);
+
+        if (idx < media.videos.length - 1) {
+          const vDivider = document.createElement('div');
+          vDivider.className = 'x-dl-divider';
+          menu.appendChild(vDivider);
         }
       });
     }
@@ -837,7 +826,7 @@
         const totalHeight = scaledHeights.reduce((a, b) => a + b, 0);
 
         canvas.width = targetWidth;
-        canvas.height = totalHeight;
+        canvas.height = targetHeight;
 
         // Draw images vertically top-to-bottom (cropped of border lines)
         let currentY = 0;
