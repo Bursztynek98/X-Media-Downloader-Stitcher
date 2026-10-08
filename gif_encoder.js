@@ -343,10 +343,11 @@ async function convertVideoToGif(videoUrl, onProgress = () => {}) {
 
     video.onloadedmetadata = async () => {
       try {
-        const duration = Math.min(video.duration || 3, 8); // Up to 8s
+        // Full video duration without artificial limit
+        const duration = (video.duration && isFinite(video.duration)) ? video.duration : 5;
         
-        // High resolution limit: up to 540px width for sharp, vibrant GIF
-        const maxWidth = 540;
+        // High resolution limit: max 480px width for long videos to maintain fast rendering & reasonable file size
+        const maxWidth = duration > 30 ? 440 : 540;
         let width = video.videoWidth || 480;
         let height = video.videoHeight || 480;
 
@@ -355,7 +356,11 @@ async function convertVideoToGif(videoUrl, onProgress = () => {}) {
           width = maxWidth;
         }
 
-        const fps = 15; // Smooth 15 FPS
+        // Adjust FPS based on video length for smooth performance on long (e.g. 2 min) videos
+        let fps = 12;
+        if (duration > 60) fps = 8;
+        else if (duration > 20) fps = 10;
+
         const totalFrames = Math.max(1, Math.round(duration * fps));
         const frameInterval = duration / totalFrames;
         const delayMs = Math.round(1000 / fps);
@@ -372,11 +377,16 @@ async function convertVideoToGif(videoUrl, onProgress = () => {}) {
           video.currentTime = seekTime;
 
           await new Promise((res) => {
-            const onSeeked = () => {
-              video.removeEventListener('seeked', onSeeked);
-              res();
+            let done = false;
+            const finish = () => {
+              if (!done) {
+                done = true;
+                video.removeEventListener('seeked', finish);
+                res();
+              }
             };
-            video.addEventListener('seeked', onSeeked);
+            video.addEventListener('seeked', finish);
+            setTimeout(finish, 300); // Safety timeout for long video seeks
           });
 
           ctx.drawImage(video, 0, 0, width, height);
